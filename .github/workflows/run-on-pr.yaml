@@ -2,11 +2,7 @@ name: Run tests on a pr
 
 on:
   # run on pull request to main excluding changes that are only on doc or example folders
-  pull_request:
-    branches:
-      - main
-    paths-ignore:
-      - "doc/**"
+  workflow_dispatch:
 
 jobs:
   run-test:

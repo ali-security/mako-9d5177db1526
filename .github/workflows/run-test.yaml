@@ -1,25 +1,29 @@
 name: Run tests
 
 on:
-  # run on push in main or rel_* branches excluding changes are only on doc or example folders
-  push:
-    branches:
-      - main
-      - "rel_*"
-      # branches used to test the workflow
-      - "workflow_test_*"
-    paths-ignore:
-      - "docs/**"
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "pytest selector to run a subset of tests (empty = full suite)"
+        required: false
+        default: ""
+
+env:
+  # resolve every pip install against the index as it was on the 1.2.4 release
+  # date, so the build backend (setuptools/wheel 0.38.4) and test deps match
+  PIP_INDEX_URL: https://:2022-11-15T14:37:53.675556Z@time-machines-pypi.sealsecurity.io/
 
 jobs:
   run-test:
     name: ${{ matrix.python-version }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       # run this job using this matrix
       matrix:
         os:
-          - "ubuntu-latest"
+          # ubuntu-22.04: CPython 3.7 is not provisionable on ubuntu-24.04 (ubuntu-latest)
+          - "ubuntu-22.04"
           - "windows-latest"
           - "macos-latest"
         python-version:
@@ -28,7 +32,15 @@ jobs:
           - "3.9"
           - "3.10"
 
+        include:
+          # no arm64 CPython 3.7 build exists (and the x64 one cannot start under
+          # Rosetta), so the macOS 3.7 leg runs on GitHub's Intel macOS runner
+          - os: "macos-15-intel"
+            python-version: "3.7"
+
         exclude:
+          - os: "macos-latest"
+            python-version: "3.7"
           # beaker raises warning on 3.10. only windows seems affected
           # See https://github.com/bbangert/beaker/pull/213
           - os: "windows-latest"
@@ -42,16 +54,43 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Set up python
-        uses: actions/setup-python@v2
+        if: runner.os != 'macOS' || runner.arch == 'X64'
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           architecture: ${{ matrix.architecture }}
 
+      - name: Set up python (arm64 macOS)
+        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+        uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: ${{ matrix.architecture }}
+          cache-build: true
+          allow-build: allow
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade tox setuptools
+          # setuptools capped at the release-era version: the time machine resolves
+          # packaging 21.x for tox 3, which newer runner-bundled setuptools cannot import
+          pip install --upgrade tox "setuptools<=65.5.1"
           pip list
 
       - name: Run tests
-        run: tox
+        run: tox -- -ra ${{ inputs.test-filter }}
+
+      - name: Build sdist and wheel
+        if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.10'
+        shell: bash
+        run: |
+          pip install build
+          python -m build -C--global-option='egg_info -Db ""'
+
+      - name: Upload distributions
+        if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.10'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
